@@ -1,0 +1,215 @@
+import pyarrow as pa
+import pyarrow.parquet as pq
+import polars as pl
+from dataclasses import dataclass, field
+from typing import Dict, List, Any, Optional
+from datetime import datetime
+
+@dataclass
+class OrderBookSnapshotRecorder:
+    instrument: str
+    output_dir: str = './raw_orderbook_snapshots/'
+    depth_levels: int = 10
+    
+    def __post_init__(self):
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Enhanced schema with detailed order flow tracking
+        self._schema = pa.schema([
+            # Timestamps and identifiers
+            ('ts_event', pa.timestamp('ns')),
+            ('ts_recv', pa.timestamp('ns')),
+            ('instrument', pa.string()),
+            ('exchange', pa.string()),
+            ('sequence_number', pa.int64()),  # Message sequence number
+            
+            # Order reference data
+            ('order_id', pa.string()),        # Unique order identifier
+            ('original_order_id', pa.string()),# For modifications/cancels
+            
+            # Event classification
+            ('event_type', pa.string()),      # 'new', 'modify', 'cancel', 'trade', 'trade_cancel'
+            ('event_subtype', pa.string()),   # 'aggressive_buy', 'passive_sell', 'cancel_buy', etc.
+            ('side', pa.string()),            # 'bid' or 'ask'
+            
+            # Order details
+            ('price', pa.float64()),
+            ('size', pa.float64()),
+            ('old_price', pa.float64()),      # For modifications
+            ('old_size', pa.float64()),       # For modifications
+            
+            # Trade-specific information
+            ('is_trade', pa.bool_()),         # True if event involves a trade
+            ('trade_id', pa.string()),        # Unique trade identifier
+            ('aggressor_side', pa.string()),  # Which side initiated the trade
+            ('resting_order_id', pa.string()),# ID of the passive order
+            ('aggressive_order_id', pa.string()),# ID of the aggressive order
+            
+            # Cancellation details
+            ('is_cancel', pa.bool_()),        # True if event is a cancellation
+            ('cancel_type', pa.string()),     # 'user', 'ioc', 'timeout', etc.
+            ('time_in_book', pa.int64()),     # Nanoseconds order was in book
+            
+            # Full orderbook state
+            ('bid_prices', pa.list_(pa.float64())),
+            ('bid_volumes', pa.list_(pa.float64())),
+            ('ask_prices', pa.list_(pa.float64())),
+            ('ask_volumes', pa.list_(pa.float64())),
+            
+            # Order book metrics at event time
+            ('best_bid', pa.float64()),
+            ('best_ask', pa.float64()),
+            ('bid_volume', pa.float64()),
+            ('ask_volume', pa.float64()),
+            
+            # Market impact
+            ('mid_price_before', pa.float64()),
+            ('mid_price_after', pa.float64()),
+            ('spread_before', pa.float64()),
+            ('spread_after', pa.float64())
+        ])
+        
+        # Initialize order tracking
+        self._active_orders: Dict[str, Dict] = {}
+        self._last_mid_price: float = None
+        self._last_spread: float = None
+    
+    def create_snapshot_record(self, msg) -> Dict[str, Any]:
+        """
+        Create enhanced snapshot record with order flow attribution
+        """
+        # Basic event info
+        snapshot = {
+            'ts_event': msg.ts_event,
+            'ts_recv': msg.ts_recv,
+            'instrument': msg.symbol,
+            'exchange': msg.exchange,
+            'sequence_number': msg.sequence_number,
+            'is_trade': False,
+            'is_cancel': False
+        }
+        
+        # Calculate market state before event
+        best_bid = max(self._active_orders.get('bid', {}).keys(), default=None)
+        best_ask = min(self._active_orders.get('ask', {}).keys(), default=None)
+        if best_bid and best_ask:
+            self._last_mid_price = (best_bid + best_ask) / 2
+            self._last_spread = best_ask - best_bid
+        
+        if msg.record_type == 'mbo':
+            # Handle Market By Order message
+            snapshot.update(self._process_order_event(msg))
+        elif msg.record_type == 'trade':
+            # Handle Trade message
+            snapshot.update(self._process_trade_event(msg))
+        
+        # Add market impact data
+        new_best_bid = max(self._active_orders.get('bid', {}).keys(), default=None)
+        new_best_ask = min(self._active_orders.get('ask', {}).keys(), default=None)
+        if new_best_bid and new_best_ask:
+            new_mid_price = (new_best_bid + new_best_ask) / 2
+            new_spread = new_best_ask - new_best_bid
+            snapshot.update({
+                'mid_price_before': self._last_mid_price,
+                'mid_price_after': new_mid_price,
+                'spread_before': self._last_spread,
+                'spread_after': new_spread
+            })
+        
+        # Add current orderbook state
+        snapshot.update(self._get_orderbook_state())
+        
+        return snapshot
+    
+    def _process_order_event(self, msg) -> Dict[str, Any]:
+        """
+        Process and classify order events
+        """
+        event_data = {
+            'order_id': msg.order_id,
+            'side': msg.side,
+            'price': msg.price,
+            'size': msg.size
+        }
+        
+        if msg.action == 'add':
+            event_data.update({
+                'event_type': 'new',
+                'event_subtype': f'passive_{msg.side}',
+                'time_in_book': 0
+            })
+            self._active_orders[msg.order_id] = {
+                'side': msg.side,
+                'price': msg.price,
+                'size': msg.size,
+                'entry_time': msg.ts_event
+            }
+            
+        elif msg.action == 'modify':
+            old_order = self._active_orders.get(msg.order_id, {})
+            event_data.update({
+                'event_type': 'modify',
+                'old_price': old_order.get('price'),
+                'old_size': old_order.get('size'),
+                'time_in_book': (msg.ts_event - old_order.get('entry_time', msg.ts_event)).nanoseconds
+            })
+            if old_order:
+                self._active_orders[msg.order_id].update({
+                    'price': msg.price,
+                    'size': msg.size
+                })
+                
+        elif msg.action == 'delete':
+            old_order = self._active_orders.get(msg.order_id, {})
+            event_data.update({
+                'event_type': 'cancel',
+                'is_cancel': True,
+                'cancel_type': 'user',  # Could be refined based on additional data
+                'time_in_book': (msg.ts_event - old_order.get('entry_time', msg.ts_event)).nanoseconds
+            })
+            self._active_orders.pop(msg.order_id, None)
+        
+        return event_data
+    
+    def _process_trade_event(self, msg) -> Dict[str, Any]:
+        """
+        Process and attribute trade events
+        """
+        return {
+            'event_type': 'trade',
+            'is_trade': True,
+            'trade_id': msg.trade_id,
+            'aggressor_side': msg.aggressor_side,
+            'price': msg.price,
+            'size': msg.size,
+            'resting_order_id': msg.resting_order_id,
+            'aggressive_order_id': msg.aggressive_order_id
+        }
+    
+    def _get_orderbook_state(self) -> Dict[str, Any]:
+        """
+        Get current full orderbook state
+        """
+        # Organize orders by side and price
+        bids = {}
+        asks = {}
+        for order_id, order in self._active_orders.items():
+            if order['side'] == 'bid':
+                bids[order['price']] = bids.get(order['price'], 0) + order['size']
+            else:
+                asks[order['price']] = asks.get(order['price'], 0) + order['size']
+        
+        # Sort and limit to depth levels
+        sorted_bids = sorted(bids.items(), reverse=True)[:self.depth_levels]
+        sorted_asks = sorted(asks.items())[:self.depth_levels]
+        
+        return {
+            'bid_prices': [price for price, _ in sorted_bids],
+            'bid_volumes': [volume for _, volume in sorted_bids],
+            'ask_prices': [price for price, _ in sorted_asks],
+            'ask_volumes': [volume for _, volume in sorted_asks],
+            'best_bid': sorted_bids[0][0] if sorted_bids else None,
+            'best_ask': sorted_asks[0][0] if sorted_asks else None,
+            'bid_volume': sum(bids.values()),
+            'ask_volume': sum(asks.values())
+        }
