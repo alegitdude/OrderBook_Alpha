@@ -4,32 +4,35 @@ import polars as pl
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional
 from datetime import datetime
+import os
 
 @dataclass
 class OrderBookSnapshotRecorder:
+    """
+    Records atomic orderbook data for futures market
+    Focuses on raw, non-parametric data points for maximum reusability
+    """
     instrument: str
     output_dir: str = './raw_orderbook_snapshots/'
-    depth_levels: int = 10
     
     def __post_init__(self):
         os.makedirs(self.output_dir, exist_ok=True)
         
-        # Enhanced schema with detailed order flow tracking
         self._schema = pa.schema([
             # Timestamps and identifiers
             ('ts_event', pa.timestamp('ns')),
             ('ts_recv', pa.timestamp('ns')),
             ('instrument', pa.string()),
             ('exchange', pa.string()),
-            ('sequence_number', pa.int64()),  # Message sequence number
+            ('sequence_number', pa.int64()),
             
             # Order reference data
-            ('order_id', pa.string()),        # Unique order identifier
-            ('original_order_id', pa.string()),# For modifications/cancels
+            ('order_id', pa.string()),
+            ('original_order_id', pa.string()),
+            ('priority', pa.int64()),         # Order priority/sequence at price level
             
             # Event classification
             ('event_type', pa.string()),      # 'new', 'modify', 'cancel', 'trade', 'trade_cancel'
-            ('event_subtype', pa.string()),   # 'aggressive_buy', 'passive_sell', 'cancel_buy', etc.
             ('side', pa.string()),            # 'bid' or 'ask'
             
             # Order details
@@ -37,43 +40,53 @@ class OrderBookSnapshotRecorder:
             ('size', pa.float64()),
             ('old_price', pa.float64()),      # For modifications
             ('old_size', pa.float64()),       # For modifications
+            ('entry_time', pa.timestamp('ns')), # When order first entered book
             
             # Trade-specific information
-            ('is_trade', pa.bool_()),         # True if event involves a trade
-            ('trade_id', pa.string()),        # Unique trade identifier
-            ('aggressor_side', pa.string()),  # Which side initiated the trade
-            ('resting_order_id', pa.string()),# ID of the passive order
+            ('is_trade', pa.bool_()),
+            ('trade_id', pa.string()),
+            ('aggressor_side', pa.string()),    # Which side initiated the trade
+            ('resting_order_id', pa.string()),  # ID of the passive order
             ('aggressive_order_id', pa.string()),# ID of the aggressive order
+            ('trade_size', pa.float64()),       # Size of the trade
             
             # Cancellation details
-            ('is_cancel', pa.bool_()),        # True if event is a cancellation
-            ('cancel_type', pa.string()),     # 'user', 'ioc', 'timeout', etc.
-            ('time_in_book', pa.int64()),     # Nanoseconds order was in book
+            ('is_cancel', pa.bool_()),
+            ('cancel_type', pa.string()),       # 'user', 'ioc', 'timeout', etc.
+            ('original_entry_time', pa.timestamp('ns')), # When cancelled order entered
             
-            # Full orderbook state
-            ('bid_prices', pa.list_(pa.float64())),
-            ('bid_volumes', pa.list_(pa.float64())),
-            ('ask_prices', pa.list_(pa.float64())),
-            ('ask_volumes', pa.list_(pa.float64())),
+            # Full orderbook state (raw snapshots)
+            ('bid_prices', pa.list_(pa.float64())),    # All bid prices
+            ('bid_volumes', pa.list_(pa.float64())),   # Volume at each bid
+            ('ask_prices', pa.list_(pa.float64())),    # All ask prices
+            ('ask_volumes', pa.list_(pa.float64())),   # Volume at each ask
+            ('bid_order_counts', pa.list_(pa.int32())), # Orders at each bid
+            ('ask_order_counts', pa.list_(pa.int32())), # Orders at each ask
             
-            # Order book metrics at event time
+            # Orderbook metrics at event time (atomic)
             ('best_bid', pa.float64()),
             ('best_ask', pa.float64()),
-            ('bid_volume', pa.float64()),
-            ('ask_volume', pa.float64()),
+            ('best_bid_volume', pa.float64()),
+            ('best_ask_volume', pa.float64()),
+            ('bid_order_count', pa.int32()),   # Total orders on bid side
+            ('ask_order_count', pa.int32()),   # Total orders on ask side
             
-            # Market impact
+            # Market Impact (pre/post state)
             ('mid_price_before', pa.float64()),
             ('mid_price_after', pa.float64()),
             ('spread_before', pa.float64()),
-            ('spread_after', pa.float64())
+            ('spread_after', pa.float64()),
+            
+            # Session markers
+            ('session_date', pa.date32()),
+            ('is_session_start', pa.bool_()),
+            ('is_session_end', pa.bool_())
         ])
         
-        # Initialize order tracking
+        # Initialize state tracking
         self._active_orders: Dict[str, Dict] = {}
-        self._last_mid_price: float = None
-        self._last_spread: float = None
-    
+        self._last_mid_price: Optional[float] = None
+        self._last_spread: Optional[float] = None
     def create_snapshot_record(self, msg) -> Dict[str, Any]:
         """
         Create enhanced snapshot record with order flow attribution
