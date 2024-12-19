@@ -329,4 +329,4 @@ class OrderBookSnapshotRecorder:
     def finalize(self):
         """Finalize processing and write any remaining data"""
         if self._current_batch:
-            self._write_snapshot()
+            self._write_snapshot() 
