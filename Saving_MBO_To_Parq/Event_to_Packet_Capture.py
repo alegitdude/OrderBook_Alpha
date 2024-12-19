@@ -33,40 +33,34 @@ class OrderBookSnapshotRecorder:
         
         # Define schema for Parquet storage
         self._schema = pa.schema([
-            # Timestamps and identifiers
-            ('ts_event', pa.timestamp('ns')),
+            # Raw Databento message fields (in CSV order)
             ('ts_recv', pa.timestamp('ns')),
-            ('instrument', pa.string()),
-            ('exchange', pa.string()),
-            ('sequence_number', pa.int64()),
-            ('session_date', pa.date32()),
-            
-            # Order reference data
-            ('order_id', pa.string()),
-            ('original_order_id', pa.string()),
-            
-            # Event classification
-            ('event_type', pa.string()),      # 'new', 'modify', 'cancel', 'trade'
-            ('event_subtype', pa.string()),   # 'aggressive_buy', 'passive_sell', etc.
-            ('side', pa.string()),            # 'bid' or 'ask'
-            
-            # Order details
+            ('ts_event', pa.timestamp('ns')),
+            ('rtype', pa.string()),
+            ('publisher_id', pa.string()),
+            ('instrument_id', pa.int64()),
+            ('action', pa.string()),
+            ('side', pa.string()),
             ('price', pa.float64()),
             ('size', pa.float64()),
+            ('channel_id', pa.int64()),
+            ('order_id', pa.string()),
+            ('flags', pa.int64()),
+            ('ts_in_delta', pa.int64()),
+            ('sequence', pa.int64()),
+            ('symbol', pa.string()),
+            
+            # Additional derived fields for order book tracking
+            ('event_type', pa.string()),      # 'new', 'modify', 'cancel', 'trade'
+            ('event_subtype', pa.string()),   # 'aggressive_buy', 'passive_sell', etc.
+            ('is_trade', pa.bool_()),
+            ('is_cancel', pa.bool_()),
+            
+            # Order lifecycle fields
+            ('original_order_id', pa.string()),
             ('old_price', pa.float64()),
             ('old_size', pa.float64()),
             ('entry_time', pa.timestamp('ns')),
-            
-            # Trade-specific information
-            ('is_trade', pa.bool_()),
-            ('trade_id', pa.string()),
-            ('aggressor_side', pa.string()),
-            ('resting_order_id', pa.string()),
-            ('aggressive_order_id', pa.string()),
-            ('trade_size', pa.float64()),
-            
-            # Cancellation details
-            ('is_cancel', pa.bool_()),
             ('original_entry_time', pa.timestamp('ns')),
             
             # Market state
@@ -115,17 +109,26 @@ class OrderBookSnapshotRecorder:
     def process_databento_message(self, msg):
         """Process a single Databento message"""
         try:
-            # Create basic snapshot
+            # Create basic snapshot with raw message data
             snapshot = {
-                'ts_event': msg.ts_event,
-                'ts_recv': msg.ts_recv,
-                'instrument': msg.symbol,
-                'exchange': msg.exchange,
-                'sequence_number': msg.sequence_number,
-                'session_date': msg.ts_event.date(),
+                'ts_recv': msg['ts_recv'],
+                'ts_event': msg['ts_event'],
+                'rtype': msg['rtype'],
+                'publisher_id': msg['publisher_id'],
+                'instrument_id': msg['instrument_id'],
+                'action': msg['action'],
+                'side': msg['side'],
+                'price': msg['price'],
+                'size': msg['size'],
+                'channel_id': msg['channel_id'],
+                'order_id': msg['order_id'],
+                'flags': msg['flags'],
+                'ts_in_delta': msg['ts_in_delta'],
+                'sequence': msg['sequence'],
+                'symbol': msg['symbol'],
                 'is_trade': False,
                 'is_cancel': False
-            }
+        }
             
             # Calculate market state before event
             best_bid = max(self._active_orders.get('bid', {}).keys(), default=None)
@@ -140,12 +143,8 @@ class OrderBookSnapshotRecorder:
                 })
             
             # Process by message type
-            if msg.record_type == 'mbo':
-                order_data = self._process_order_event(msg)
-                snapshot.update(order_data)
-            elif msg.record_type == 'trade':
-                trade_data = self._process_trade_event(msg)
-                snapshot.update(trade_data)
+            order_data = self._process_order_event(msg)
+            snapshot.update(order_data)
             
             # Get updated orderbook state
             book_state = self._get_orderbook_state()
@@ -174,52 +173,56 @@ class OrderBookSnapshotRecorder:
     def _process_order_event(self, msg) -> Dict[str, Any]:
         """Process and classify order events"""
         event_data = {
-            'order_id': msg.order_id,
-            'side': msg.side,
-            'price': msg.price,
-            'size': msg.size
+            'order_id': msg['order_id'],
+            'side': msg['side'],
+            'price': msg['price'],
+            'size': msg['size'],
+            'flags': msg['flags'],
+            'action': msg['action']
         }
         
-        if msg.action == 'add':
+        if msg['action'] == 'add':
             event_data.update({
                 'event_type': 'new',
-                'event_subtype': f'passive_{msg.side}',
-                'entry_time': msg.ts_event,
-                'original_entry_time': msg.ts_event
+                'event_subtype': f'passive_{msg["side"]}',
+                'entry_time': msg['ts_event'],
+                'original_entry_time': msg['ts_event']
             })
-            self._active_orders[msg.order_id] = {
-                'side': msg.side,
-                'price': msg.price,
-                'size': msg.size,
-                'entry_time': msg.ts_event
+            self._active_orders[msg['order_id']] = {
+                'side': msg['side'],
+                'price': msg['price'],
+                'size': msg['size'],
+                'entry_time': msg['ts_event'],
+                'flags': msg['flags']
             }
-            
-        elif msg.action == 'modify':
-            old_order = self._active_orders.get(msg.order_id, {})
+        
+        elif msg['action'] == 'modify':
+            old_order = self._active_orders.get(msg['order_id'], {})
             event_data.update({
                 'event_type': 'modify',
-                'event_subtype': f'modify_{msg.side}',
+                'event_subtype': f'modify_{msg["side"]}',
                 'old_price': old_order.get('price'),
                 'old_size': old_order.get('size'),
                 'original_entry_time': old_order.get('entry_time'),
-                'original_order_id': msg.order_id
+                'original_order_id': msg['order_id']
             })
             if old_order:
-                self._active_orders[msg.order_id].update({
-                    'price': msg.price,
-                    'size': msg.size
+                self._active_orders[msg['order_id']].update({
+                    'price': msg['price'],
+                    'size': msg['size'],
+                    'flags': msg['flags']
                 })
                 
-        elif msg.action == 'cancel':
-            old_order = self._active_orders.get(msg.order_id, {})
+        elif msg['action'] == 'cancel':
+            old_order = self._active_orders.get(msg['order_id'], {})
             event_data.update({
                 'event_type': 'cancel',
-                'event_subtype': f'cancel_{msg.side}',
+                'event_subtype': f'cancel_{msg["side"]}',
                 'is_cancel': True,
                 'original_entry_time': old_order.get('entry_time'),
-                'original_order_id': msg.order_id
+                'original_order_id': msg['order_id']
             })
-            self._active_orders.pop(msg.order_id, None)
+            self._active_orders.pop(msg['order_id'], None)
         
         return event_data
     
@@ -312,7 +315,6 @@ class OrderBookSnapshotRecorder:
                 table,
                 self._current_file,
                 compression='snappy',
-                compression_level=5,
                 write_statistics=True
             )
             

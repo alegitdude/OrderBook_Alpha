@@ -47,10 +47,10 @@ class OrderBookDataProcessor:
         # Main directories
         self.raw_data_dir = self.base_dir / 'raw_data'
         self.processed_data_dir = self.base_dir / 'processed_data'
-        self.archive_dir = self.base_dir / 'archive'
+        # self.archive_dir = self.base_dir / 'archive'
         
         # Create all directories
-        for directory in [self.raw_data_dir, self.processed_data_dir, self.archive_dir]:
+        for directory in [self.raw_data_dir, self.processed_data_dir]:
             directory.mkdir(parents=True, exist_ok=True)
     
     def process_data_file(
@@ -74,7 +74,7 @@ class OrderBookDataProcessor:
                 session_date = datetime.now().strftime("%Y%m%d")
             
             # Create output directory for this session
-            output_dir = self.processed_data_dir / self.instrument / session_date
+            output_dir = self.processed_data_dir / self.instrument / input_file
             output_dir.mkdir(parents=True, exist_ok=True)
             
             # Initialize recorder for this session
@@ -144,19 +144,19 @@ def main():
     processor = OrderBookDataProcessor(
         instrument="ES",
         tick_size=0.25,
-        base_dir="./market_data",
+        base_dir="D:\ESZ3 MBO 11-27-23_12-15-23",
         batch_size=100_000,
         max_levels=50
     )
     
     # Process a single file
-    processor.process_data_file("path/to/ES_20240314.csv")
+    processor.process_data_file("D:\ESZ3 MBO 11-27-23_12-15-23\ESZ3 11-27.csv")
     
     # Or process all files in a directory
-    processor.process_directory(
-        "path/to/data_directory",
-        pattern="ES_*.csv"
-    )
+    # processor.process_directory(
+    #     "path/to/data_directory",
+    #     pattern="ES_*.csv"
+    # )
 
 if __name__ == "__main__":
     main()

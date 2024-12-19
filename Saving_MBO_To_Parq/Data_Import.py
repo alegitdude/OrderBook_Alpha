@@ -20,18 +20,21 @@ class DatabentoImporter:
         
         # Define Databento MBO futures schema
         self.mbo_columns = [
-            'ts_event',           # Timestamp of event
-            'ts_recv',           # Timestamp of receipt
-            'sequence',          # Message sequence number
-            'action',            # add, modify, cancel, trade
-            'order_id',          # Order ID
-            'side',              # bid or ask
-            'price',             # Order price
-            'size',             # Order size
-            'flags',            # Order flags
-            'depth',            # Book depth level
-            'symbol',           # Instrument symbol
-            'exchange'          # Exchange code
+            'ts_recv',          # Timestamp of receipt
+            'ts_event',         # Timestamp of event
+            'rtype',            # Record type
+            'publisher_id',     # Publisher identifier
+            'instrument_id',    # Instrument identifier
+            'action',           # add, modify, cancel, trade
+            'side',            # bid or ask
+            'price',           # Order price
+            'size',            # Order size
+            'channel_id',      # Channel identifier
+            'order_id',        # Order ID
+            'flags',           # Order flags
+            'ts_in_delta',     # Time delta for inbound message
+            'sequence',        # Message sequence number
+            'symbol'           # Instrument symbol
         ]
     
     def create_event_stream(self, file_path: str) -> Iterator:
@@ -58,24 +61,32 @@ class DatabentoImporter:
         Process Databento CSV file
         """
         try:
+            # Skip header if it exists
+            header_row = pd.read_csv(csv_path, nrows=0)
+            skip_rows = 1 if any(col in header_row.columns for col in ['ts_recv', 'ts_event']) else 0
+            
             # Read CSV in chunks to handle large files efficiently
             for chunk in pd.read_csv(
                 csv_path,
                 names=self.mbo_columns,
                 dtype={
-                    'ts_event': 'int64',
                     'ts_recv': 'int64',
-                    'sequence': 'int64',
+                    'ts_event': 'int64',
+                    'rtype': 'str',
+                    'publisher_id': 'str',
+                    'instrument_id': 'int64',
                     'action': 'str',
-                    'order_id': 'str',
                     'side': 'str',
                     'price': 'float64',
                     'size': 'float64',
+                    'channel_id': 'int64',
+                    'order_id': 'str',
                     'flags': 'int64',
-                    'depth': 'int64',
-                    'symbol': 'str',
-                    'exchange': 'str'
+                    'ts_in_delta': 'int64',
+                    'sequence': 'int64',
+                    'symbol': 'str'
                 },
+                skiprows=skip_rows,
                 chunksize=10000
             ):
                 # Convert timestamps from nanoseconds to datetime
@@ -110,9 +121,5 @@ class DatabentoImporter:
         """
         Validate that event has all required fields
         """
-        required_fields = {
-            'ts_event', 'action', 'order_id', 
-            'side', 'price', 'size', 'symbol'
-        }
-        
+        required_fields = set(self.mbo_columns)  # Use all columns as required fields
         return all(field in event for field in required_fields)
