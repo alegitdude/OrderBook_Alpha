@@ -8,7 +8,7 @@ class DatabentoImporter:
     """
     Handles importing Databento market data from either:
     1. Databento CSV files (with standard MBO futures schema)
-    2. DBN files (with zstd compression)
+    2. DBN files (with zstd compression )
     """
     
     def __init__(self):
