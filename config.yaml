@@ -1,0 +1,68 @@
+# Data configuration
+data:
+  input_dir: "/path/to/orderbook/data"
+  output_dir: "/path/to/output"
+  file_pattern: "*.parquet"
+
+# Processing parameters
+processing:
+  start_time: "2024-01-01T09:00:00"
+  end_time: "2024-01-01T10:00:00"
+  symbol: "ESH4"
+
+# Sequence identification parameters
+sequence:
+  min_moves: 5 # Look for 5 consecutive moves
+  min_ticks: 1.0 # Each move must be at least 1 tick
+  max_duration_ms: 10000 # Maximum 10 seconds for sequence
+  min_volume: 100.0 # Minimum volume during sequence
+  max_retrace_ticks: 0.0 # Maximum retracement allowed
+  tick_size: 0.25 # Size of one tick
+
+# Analysis parameters
+analysis:
+  lookback_messages: 1000 # How far to look back before sequence
+  lookback_intervals: [50, 100, 200] # Different intervals to analyze
+  required_calm_ticks: 1.0 # Required price calmness in ticks
+  min_confidence: 0.7 # Minimum confidence for prediction
+
+# Time series feature configuration
+timeseries:
+  # High frequency features (time-based)
+  high_freq:
+    order_flow:
+      lookback_type: TIME
+      granularity_ms: 1
+      history_ms: 1000
+
+    book_pressure:
+      lookback_type: TIME
+      granularity_ms: 5
+      history_ms: 1000
+
+    trade_intensity:
+      lookback_type: TIME
+      granularity_ms: 10
+      history_ms: 1000
+
+  # Message-based features
+  message_based:
+    order_flow:
+      lookback_type: MESSAGES
+      granularity_messages: 1
+      history_messages: 1000
+
+    momentum:
+      lookback_type: MESSAGES
+      granularity_messages: 10
+      history_messages: 1000
+
+    volatility:
+      lookback_type: MESSAGES
+      granularity_messages: 5
+      history_messages: 500
+
+# Transformer configuration
+transformer:
+  max_sequence_length: 1000
+  normalize_features: true
